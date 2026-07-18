@@ -6,7 +6,7 @@ https://realtommygreen.github.io/desert-vendetta-76/
 
 Dieses Repository enthält ausschließlich die Web-Version mit ihren Audio-Assets. Die Android-App und ihre Build-Dateien sind nicht enthalten.
 
-Aktueller Spielstand: **Version 1.8**
+Aktueller Spielstand: **Version 1.9**
 
 ## Start
 

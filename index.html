@@ -2919,27 +2919,67 @@
       return result;
     }
 
-    function findEnemySpawnPosition() {
+    function spawnPositionClearsObstacles(pos, clearance = 7) {
+      let clear = true;
+      forEachObstacleInBounds(
+        pos.x - clearance,
+        pos.z - clearance,
+        pos.x + clearance,
+        pos.z + clearance,
+        obstacle => {
+          if (!clear || obstacle.destroyed) return;
+          const safeRadius = obstacle.radius + clearance;
+          const dx = pos.x - obstacle.pos.x;
+          const dz = pos.z - obstacle.pos.z;
+          if (dx * dx + dz * dz < safeRadius * safeRadius) clear = false;
+        }
+      );
+      return clear;
+    }
+
+    function findEnemySpawnPosition(excludeEnemy = null) {
       let candidate = new THREE.Vector3();
-      for (let attempt = 0; attempt < 28; attempt++) {
-        const a = rand(0, TAU);
-        const r = rand(245, 420);
-        candidate.set(Math.sin(a) * r, 0, Math.cos(a) * r);
+      for (let attempt = 0; attempt < 96; attempt++) {
+        if (attempt < 72 || !world.roads.length) {
+          const a = rand(0, TAU);
+          const r = rand(225, world.radius - 52);
+          candidate.set(Math.sin(a) * r, 0, Math.cos(a) * r);
+        } else {
+          const road = world.roads[Math.floor(rand(0, world.roads.length))];
+          candidate.copy(road.a).lerp(road.b, rand(.12, .88));
+          const tangent = road.b.clone().sub(road.a).setY(0).normalize();
+          candidate.addScaledVector(
+            new THREE.Vector3(-tangent.z, 0, tangent.x),
+            rand(-road.width * .18, road.width * .18)
+          );
+        }
         candidate.y = terrainHeight(candidate.x, candidate.z);
+        const mapDistance = Math.hypot(candidate.x, candidate.z);
+        if (mapDistance < 90 || mapDistance > world.radius - 45) continue;
         if (candidate.distanceToSquared(player.pos) < 75 * 75) continue;
+        if (!spawnPositionClearsObstacles(candidate, 7)) continue;
         let clear = true;
         for (const other of world.enemies) {
-          if (!other.dead && candidate.distanceToSquared(other.pos) < 13 * 13) {
+          if (other !== excludeEnemy && !other.dead &&
+              candidate.distanceToSquared(other.pos) < 13 * 13) {
             clear = false;
             break;
           }
         }
         if (clear) return candidate.clone();
       }
-      const fallbackAngle = rand(0, TAU);
-      const fallback = new THREE.Vector3(Math.sin(fallbackAngle) * 360, 0, Math.cos(fallbackAngle) * 360);
-      fallback.y = terrainHeight(fallback.x, fallback.z);
-      return fallback;
+      for (const radius of [300, 250, 350, 200]) {
+        const offset = rand(0, TAU);
+        for (let i = 0; i < 48; i++) {
+          const angle = offset + i / 48 * TAU;
+          candidate.set(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+          candidate.y = terrainHeight(candidate.x, candidate.z);
+          if (candidate.distanceToSquared(player.pos) >= 75 * 75 &&
+              spawnPositionClearsObstacles(candidate, 7)) return candidate.clone();
+        }
+      }
+      candidate.set(0, terrainHeight(0, 0), 0);
+      return candidate;
     }
 
     function spawnEnemy(type = "raider") {
@@ -2988,6 +3028,9 @@
         smokeTimer: rand(0,.08),
         fireTimer: rand(0,.05),
         wobble: rand(0,TAU),
+        navSamplePos: spawnPos.clone(),
+        navSampleTimer: 0,
+        stuckTimer: 0,
         skill: clamp(.65 + wave*.045 + spec.skillBonus + rand(-.08,.08), .60, 1.28),
       };
       alignVehicleToTerrain(enemy, true);
@@ -3058,14 +3101,7 @@
     }
 
     function playerSpawnClearsObstacles(pos) {
-      let clear = true;
-      forEachObstacleInBounds(pos.x - 6, pos.z - 6, pos.x + 6, pos.z + 6, obstacle => {
-        if (!clear) return;
-        if (obstacle.destroyed) return;
-        const safeRadius = obstacle.radius + 6;
-        if (pos.distanceToSquared(obstacle.pos) < safeRadius * safeRadius) clear = false;
-      });
-      return clear;
+      return spawnPositionClearsObstacles(pos, 6);
     }
 
     function findPlayerSpawnPosition() {
@@ -3856,6 +3892,31 @@
         }
 
         handleObstacleCollisions(e,false);
+
+        e.navSampleTimer += dt;
+        if (e.navSampleTimer >= 1) {
+          const progress = Math.hypot(
+            e.pos.x - e.navSamplePos.x,
+            e.pos.z - e.navSamplePos.z
+          );
+          e.stuckTimer = dist > 65 && progress < 1.5
+            ? e.stuckTimer + e.navSampleTimer
+            : 0;
+          e.navSamplePos.copy(e.pos);
+          e.navSampleTimer = 0;
+          if (e.stuckTimer >= 6) {
+            e.pos.copy(findEnemySpawnPosition(e));
+            e.velocity.set(0, 0, 0);
+            e.yaw = Math.atan2(
+              -(player.pos.x - e.pos.x),
+              -(player.pos.z - e.pos.z)
+            );
+            e.stuckTimer = 0;
+            e.navSamplePos.copy(e.pos);
+            alignVehicleToTerrain(e, true);
+            e.group.position.copy(e.pos);
+          }
+        }
 
         if (e.health <= 0) destroyEnemy(e);
       }
