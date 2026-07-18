@@ -568,6 +568,46 @@
     const lerp = THREE.MathUtils.lerp;
     const rand = (a, b) => a + Math.random() * (b - a);
     const TAU = Math.PI * 2;
+    const TERRAIN_FLAT_ZONES = [
+      [0, 0, 32, 34],
+      [-105, -55, 30, 32],
+      [365, -278, 40, 34],
+      [-352, 280, 34, 32],
+      [310, 265, 32, 30],
+    ];
+
+    function rawTerrainHeight(x, z) {
+      const broadWaves =
+        Math.sin((x + 35) * .0105) * 2.7 +
+        Math.cos((z - 70) * .0120) * 2.2 +
+        Math.sin((x + z) * .0075) * 1.55 +
+        Math.sin((x - z * .55) * .0160) * .75;
+      const hillWest = 4.1 * Math.exp(-((x + 205) ** 2 + (z + 155) ** 2) / 30000);
+      const hillEast = 3.4 * Math.exp(-((x - 235) ** 2 + (z + 235) ** 2) / 25000);
+      const basinNorth = -4.0 * Math.exp(-((x - 165) ** 2 + (z - 175) ** 2) / 23000);
+      return broadWaves + hillWest + hillEast + basinNorth;
+    }
+
+    const TERRAIN_ORIGIN_HEIGHT = rawTerrainHeight(0, 0);
+
+    function terrainHeight(x, z) {
+      let height = rawTerrainHeight(x, z) - TERRAIN_ORIGIN_HEIGHT;
+      for (const [flatX, flatZ, radius, blend] of TERRAIN_FLAT_ZONES) {
+        const distance = Math.hypot(x - flatX, z - flatZ);
+        const t = clamp((distance - radius) / blend, 0, 1);
+        const smooth = t * t * (3 - 2 * t);
+        const flatHeight = rawTerrainHeight(flatX, flatZ) - TERRAIN_ORIGIN_HEIGHT;
+        height = lerp(flatHeight, height, smooth);
+      }
+      return height;
+    }
+
+    function terrainNormalAt(x, z, out = new THREE.Vector3()) {
+      const sample = 2.5;
+      const dx = terrainHeight(x - sample, z) - terrainHeight(x + sample, z);
+      const dz = terrainHeight(x, z - sample) - terrainHeight(x, z + sample);
+      return out.set(dx, sample * 2, dz).normalize();
+    }
 
     const ui = {
       hud: document.getElementById("hud"),
@@ -650,7 +690,7 @@
     }
 
     const userSettings = loadUserSettings();
-    let cameraMode = userSettings.cameraMode === "cockpit" ? "cockpit" : "chase";
+    let cameraMode = userSettings.cameraMode === "chase" ? "chase" : "cockpit";
     const cameraEuler = new THREE.Euler(0, 0, 0, "YXZ");
     const cameraQuat = new THREE.Quaternion();
     const audioListenerRight = new THREE.Vector3();
@@ -677,6 +717,12 @@
     const tempVectorA = new THREE.Vector3();
     const tempVectorB = new THREE.Vector3();
     const tempVectorC = new THREE.Vector3();
+    const terrainNormal = new THREE.Vector3();
+    const terrainForward = new THREE.Vector3();
+    const terrainRight = new THREE.Vector3();
+    const terrainBack = new THREE.Vector3();
+    const terrainBasis = new THREE.Matrix4();
+    const terrainQuaternion = new THREE.Quaternion();
     let particleRenderer;
     let bulletRenderer;
     let flashLightCursor = 0;
@@ -783,6 +829,22 @@
       const engine = new SampleSoundEngine({ baseUrl: "sounds/", maxVoices: 56 });
       window.__desertAudio = engine;
       return engine;
+    }
+
+    function alignVehicleToTerrain(vehicle, snap = false) {
+      if (!vehicle.group) return;
+      vehicle.pos.y = terrainHeight(vehicle.pos.x, vehicle.pos.z);
+      terrainNormalAt(vehicle.pos.x, vehicle.pos.z, terrainNormal);
+      terrainForward.set(-Math.sin(vehicle.yaw), 0, -Math.cos(vehicle.yaw))
+        .addScaledVector(terrainNormal, -terrainForward.dot(terrainNormal))
+        .normalize();
+      terrainRight.crossVectors(terrainForward, terrainNormal).normalize();
+      terrainForward.crossVectors(terrainNormal, terrainRight).normalize();
+      terrainBack.copy(terrainForward).multiplyScalar(-1);
+      terrainBasis.makeBasis(terrainRight, terrainNormal, terrainBack);
+      terrainQuaternion.setFromRotationMatrix(terrainBasis);
+      if (snap) vehicle.group.quaternion.copy(terrainQuaternion);
+      else vehicle.group.quaternion.slerp(terrainQuaternion, .32);
     }
 
     const MG_SHOT_PERIOD = 2.01 / 17;
@@ -1419,7 +1481,7 @@
         group.add(rock);
       }
 
-      group.position.set(x, flatTop ? -1.5 : -4, z);
+      group.position.set(x, terrainHeight(x, z) + (flatTop ? -1.5 : -4), z);
       group.rotation.y = rand(0, TAU);
       scene.add(group);
       registerRockFormationColliders(group, collisionPieces);
@@ -1544,9 +1606,19 @@
         roughness: 1,
         metalness: 0,
       });
-      const ground = new THREE.Mesh(new THREE.CircleGeometry(820, 160), groundMat);
+      const groundGeometry = new THREE.PlaneGeometry(1640, 1640, 144, 144);
+      groundGeometry.rotateX(-Math.PI / 2);
+      const groundPositions = groundGeometry.getAttribute("position");
+      for (let i = 0; i < groundPositions.count; i++) {
+        groundPositions.setY(
+          i,
+          terrainHeight(groundPositions.getX(i), groundPositions.getZ(i))
+        );
+      }
+      groundPositions.needsUpdate = true;
+      groundGeometry.computeVertexNormals();
+      const ground = new THREE.Mesh(groundGeometry, groundMat);
       ground.renderOrder = 999;
-      ground.rotation.x = -Math.PI / 2;
       ground.receiveShadow = true;
       scene.add(ground);
 
@@ -1679,6 +1751,9 @@
       const divisions = Math.max(12, Math.ceil(approximateLength / 3.2));
       const points = curve.getSpacedPoints(divisions);
       if (closed) points.pop();
+      for (const point of points) {
+        point.y = terrainHeight(point.x, point.z) + .08;
+      }
 
       const count = points.length;
       const vertices = [];
@@ -1702,6 +1777,8 @@
         const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).multiplyScalar(width * .5);
         const left = points[i].clone().add(normal);
         const right = points[i].clone().sub(normal);
+        left.y = terrainHeight(left.x, left.z) + .08;
+        right.y = terrainHeight(right.x, right.z) + .08;
         vertices.push(left.x, left.y, left.z, right.x, right.y, right.z);
         const v = distances[i] / 34;
         uvs.push(0, v, 1, v);
@@ -1762,7 +1839,7 @@
       const mat = new THREE.MeshStandardMaterial({ color: 0x7b4430, roughness: 1 });
       const rock = new THREE.Mesh(geo, mat);
       rock.scale.set(rand(.8, 1.4), rand(.55, 1.1), rand(.8, 1.45));
-      rock.position.set(x, s * .65, z);
+      rock.position.set(x, terrainHeight(x, z) + s * .65, z);
       rock.rotation.set(rand(0,1), rand(0,TAU), rand(0,1));
       rock.castShadow = rock.receiveShadow = true;
       scene.add(rock);
@@ -1788,7 +1865,7 @@
         tip.castShadow = true;
         g.add(tip);
       }
-      g.position.set(x,0,z);
+      g.position.set(x,terrainHeight(x, z),z);
       g.rotation.y = rand(0,TAU);
       scene.add(g);
       world.obstacles.push({
@@ -1857,7 +1934,7 @@
         }
       }
 
-      g.position.set(x, 0, z);
+      g.position.set(x, terrainHeight(x, z), z);
       g.rotation.y = angle;
       scene.add(g);
 
@@ -1866,6 +1943,7 @@
         const poleH = rand(3.2, 4.2);
         const local = new THREE.Vector3(side * (halfW - .6), 0, rand(2, 4));
         const worldPos = local.clone().applyAxisAngle(new THREE.Vector3(0,1,0), angle).add(new THREE.Vector3(x,0,z));
+        worldPos.y = terrainHeight(worldPos.x, worldPos.z);
         const signGroup = new THREE.Group();
         const pole = new THREE.Mesh(new THREE.CylinderGeometry(.06, .08, poleH, 6), darkMetal.clone());
         pole.position.y = poleH / 2;
@@ -1919,7 +1997,7 @@
       const sign = new THREE.Mesh(new THREE.BoxGeometry(10,1.3,.35), glow);
       sign.position.set(-2.5,5.8,4.55);
       g.add(sign);
-      g.position.set(x,0,z);
+      g.position.set(x,terrainHeight(x, z),z);
       g.rotation.y = .18;
       scene.add(g);
       world.obstacles.push({ pos: new THREE.Vector3(x,0,z), radius: 11, mesh: g });
@@ -1938,7 +2016,7 @@
         const x = startX + Math.cos(rotation) * i * spacing;
         const z = startZ + Math.sin(rotation) * i * spacing;
         if (!hasRoadClearance(x, z, .48, 2)) continue;
-        pole.position.set(x, 0, z);
+        pole.position.set(x, terrainHeight(x, z), z);
         pole.rotation.y = rotation;
         scene.add(pole);
         world.obstacles.push({ pos: new THREE.Vector3(x, 0, z), radius: .48, mesh: pole, destructible: true, kind: "utilityPole", toughness: 5.2 });
@@ -1965,7 +2043,7 @@
         crate.castShadow = true;
         group.add(crate);
       }
-      group.position.set(x,0,z);
+      group.position.set(x,terrainHeight(x, z),z);
       group.rotation.y = rand(0,TAU);
       scene.add(group);
       world.obstacles.push({ pos: new THREE.Vector3(x,0,z), radius: 6*scale, mesh: group, destructible: true, kind: "scrap", toughness: 6 });
@@ -2004,7 +2082,7 @@
       tank.position.set(23,4,11);
       tank.castShadow = true;
       g.add(tank);
-      g.position.set(x,0,z);
+      g.position.set(x,terrainHeight(x, z),z);
       g.rotation.y = rot;
       scene.add(g);
       world.obstacles.push({ pos: new THREE.Vector3(x,0,z), radius: 23, mesh: g });
@@ -2046,7 +2124,7 @@
         table.castShadow = true;
         g.add(table);
       }
-      g.position.set(x,0,z);
+      g.position.set(x,terrainHeight(x, z),z);
       g.rotation.y = rot;
       scene.add(g);
       world.obstacles.push({ pos: new THREE.Vector3(x,0,z), radius: 17, mesh: g });
@@ -2068,7 +2146,7 @@
         fence.position.set(side*18,1.1,-12+i*5);
         g.add(fence);
       }
-      g.position.set(x,0,z);
+      g.position.set(x,terrainHeight(x, z),z);
       g.rotation.y=rot;
       scene.add(g);
       world.obstacles.push({ pos:new THREE.Vector3(x,0,z), radius:18, mesh:g, destructible:true, kind:"scrap", toughness:10 });
@@ -2102,7 +2180,7 @@
       board.position.y = 7.2;
       board.castShadow = true;
       g.add(board);
-      g.position.set(x,0,z);
+      g.position.set(x,terrainHeight(x, z),z);
       g.rotation.y = rot;
       scene.add(g);
       world.obstacles.push({
@@ -2758,8 +2836,8 @@
       player.muzzleR = c.muzzleR;
       player.rocketMount = c.rocketMount;
       player.damage = c.damage;
+      alignVehicleToTerrain(player, true);
       player.group.position.copy(player.pos);
-      player.group.rotation.y = player.yaw;
       scene.add(player.group);
       const cockpit = createCockpit();
       player.cockpit = cockpit.cockpit;
@@ -2847,6 +2925,7 @@
         const a = rand(0, TAU);
         const r = rand(245, 420);
         candidate.set(Math.sin(a) * r, 0, Math.cos(a) * r);
+        candidate.y = terrainHeight(candidate.x, candidate.z);
         if (candidate.distanceToSquared(player.pos) < 75 * 75) continue;
         let clear = true;
         for (const other of world.enemies) {
@@ -2858,7 +2937,9 @@
         if (clear) return candidate.clone();
       }
       const fallbackAngle = rand(0, TAU);
-      return new THREE.Vector3(Math.sin(fallbackAngle) * 360, 0, Math.cos(fallbackAngle) * 360);
+      const fallback = new THREE.Vector3(Math.sin(fallbackAngle) * 360, 0, Math.cos(fallbackAngle) * 360);
+      fallback.y = terrainHeight(fallback.x, fallback.z);
+      return fallback;
     }
 
     function spawnEnemy(type = "raider") {
@@ -2909,8 +2990,8 @@
         wobble: rand(0,TAU),
         skill: clamp(.65 + wave*.045 + spec.skillBonus + rand(-.08,.08), .60, 1.28),
       };
+      alignVehicleToTerrain(enemy, true);
       enemy.group.position.copy(enemy.pos);
-      enemy.group.rotation.y = enemy.yaw;
       enemy.group.scale.setScalar(spec.scale);
       scene.add(enemy.group);
       world.enemies.push(enemy);
@@ -2997,9 +3078,7 @@
           const road = world.roads[Math.floor(rand(0, world.roads.length))];
           const t = rand(.08, .92);
           candidate = road.a.clone().lerp(road.b, t);
-          // Roads render slightly above the terrain to prevent z-fighting.
-          // Vehicle physics must remain strictly on the X/Z ground plane.
-          candidate.y = 0;
+          candidate.y = terrainHeight(candidate.x, candidate.z);
           const tangent = road.b.clone().sub(road.a).setY(0).normalize();
           const side = new THREE.Vector3(-tangent.z, 0, tangent.x);
           candidate.addScaledVector(side, rand(-road.width * .16, road.width * .16));
@@ -3024,7 +3103,9 @@
       if (best) return best;
       const angle = rand(0, TAU);
       const radius = rand(120, world.radius - 70);
-      return new THREE.Vector3(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+      const fallback = new THREE.Vector3(Math.sin(angle) * radius, 0, Math.cos(angle) * radius);
+      fallback.y = terrainHeight(fallback.x, fallback.z);
+      return fallback;
     }
 
     function clearEnemyProjectilesNear(pos, radius = 58) {
@@ -3046,7 +3127,7 @@
 
     function placePlayerAtRandomSpawn(isRespawn = false) {
       const spawnPos = findPlayerSpawnPosition();
-      player.pos.set(spawnPos.x, 0, spawnPos.z);
+      player.pos.set(spawnPos.x, terrainHeight(spawnPos.x, spawnPos.z), spawnPos.z);
       player.yaw = Math.atan2(spawnPos.x, spawnPos.z);
       player.velocity.set(0, 0, 0);
       player.speed = 0;
@@ -3064,8 +3145,8 @@
       player.fireTimer = 0;
       player.bodyPivot.rotation.set(0, 0, 0);
       player.bodyPivot.position.y = 0;
+      alignVehicleToTerrain(player, true);
       player.group.position.copy(player.pos);
-      player.group.rotation.y = player.yaw;
       player.group.visible = cameraMode !== "cockpit";
       if (player.cockpit) player.cockpit.visible = cameraMode === "cockpit";
       updateEnemyDamageVisuals(player);
@@ -3202,8 +3283,8 @@
       player.pos.addScaledVector(player.velocity, dt);
       constrainToWorld(player);
 
+      alignVehicleToTerrain(player);
       player.group.position.copy(player.pos);
-      player.group.rotation.y = player.yaw;
       player.speed = player.velocity.dot(forward);
 
       const roll = clamp(-steer * speedAbs / 90 + lateralSpeed/80, -.16, .16);
@@ -3274,9 +3355,7 @@
     }
 
     function constrainToWorld(obj) {
-      // Cars use an intentionally flat 2-D driving model. Never allow collision
-      // impulses or elevated road geometry to leak into the Y axis.
-      obj.pos.y = 0;
+      // Horizontal handling remains arcade-like while visual height follows terrain.
       obj.velocity.y = 0;
       const len = Math.hypot(obj.pos.x, obj.pos.z);
       if (len > world.radius) {
@@ -3289,6 +3368,7 @@
           obj.velocity.z -= nz * outward * 1.7;
         }
       }
+      obj.pos.y = terrainHeight(obj.pos.x, obj.pos.z);
     }
 
     function firePlayerGun() {
@@ -3741,8 +3821,8 @@
 
         e.pos.addScaledVector(e.velocity,dt);
         constrainToWorld(e);
+        alignVehicleToTerrain(e);
         e.group.position.copy(e.pos);
-        e.group.rotation.y = e.yaw;
         e.bodyPivot.rotation.z = lerp(e.bodyPivot.rotation.z,-turn*.08,1-Math.pow(.003,dt));
 
         for (const w of e.wheels) {
@@ -3942,9 +4022,10 @@
       }
 
       for (const vehicle of vehicles) {
-        vehicle.pos.y = 0;
+        vehicle.pos.y = terrainHeight(vehicle.pos.x, vehicle.pos.z);
         vehicle.velocity.y = 0;
         constrainToWorld(vehicle);
+        alignVehicleToTerrain(vehicle);
         vehicle.group.position.copy(vehicle.pos);
       }
     }
@@ -4354,7 +4435,7 @@
       for(const p of world.pickups){
         p.life-=dt;p.t+=dt;
         p.group.rotation.y+=dt*1.7;
-        p.group.position.y=1.25+Math.sin(p.t*3)*.18;
+        p.group.position.y=p.pos.y+1.25+Math.sin(p.t*3)*.18;
         if(player.alive && p.pos.distanceToSquared(player.pos)<12){
           if(p.type==="armor"){
             player.health=Math.min(player.maxHealth,player.health+30);
@@ -4502,8 +4583,9 @@
         d.mesh.rotation.x+=d.angular.x*dt;
         d.mesh.rotation.y+=d.angular.y*dt;
         d.mesh.rotation.z+=d.angular.z*dt;
-        if(d.pos.y<d.floor){
-          d.pos.y=d.floor;
+        const terrainFloor=terrainHeight(d.pos.x,d.pos.z)+d.floor;
+        if(d.pos.y<terrainFloor){
+          d.pos.y=terrainFloor;
           if(d.velocity.y<0)d.velocity.y*=-.34;
           d.velocity.x*=Math.pow(.18,dt);
           d.velocity.z*=Math.pow(.18,dt);
@@ -4558,8 +4640,9 @@
           .addScaledVector(f,-.30)
           .setY(player.pos.y + 2.72);
         camera.position.lerp(cockpitPos,1-Math.pow(.000001,dt));
-        cameraEuler.set(-.025 + player.bodyPivot.rotation.x*.25, player.yaw, player.bodyPivot.rotation.z*.20, "YXZ");
+        cameraEuler.set(-.025 + player.bodyPivot.rotation.x*.25, 0, player.bodyPivot.rotation.z*.20, "YXZ");
         cameraQuat.setFromEuler(cameraEuler);
+        cameraQuat.premultiply(player.group.quaternion);
         camera.quaternion.slerp(cameraQuat,1-Math.pow(.000001,dt));
         camera.fov=lerp(camera.fov,72+clamp(speed-38,0,34)*.10+nitroVisualAmount*4,1-Math.pow(.008,dt));
         player.group.visible=false;
@@ -4628,8 +4711,9 @@
       const focus = started && player.alive ? player.pos : tempVectorA.set(0, 0, 0);
       const centerX = Math.round(focus.x * .5) * 2;
       const centerZ = Math.round(focus.z * .5) * 2;
-      sunTarget.position.set(centerX, 0, centerZ);
-      sunLight.position.set(centerX - 80, 110, centerZ - 70);
+      const centerY = terrainHeight(centerX, centerZ);
+      sunTarget.position.set(centerX, centerY, centerZ);
+      sunLight.position.set(centerX - 80, centerY + 110, centerZ - 70);
       sunTarget.updateMatrixWorld();
       sunLight.updateMatrixWorld();
       renderer.shadowMap.needsUpdate = true;
