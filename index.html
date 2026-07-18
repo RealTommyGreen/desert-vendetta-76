@@ -723,6 +723,10 @@
     const terrainBack = new THREE.Vector3();
     const terrainBasis = new THREE.Matrix4();
     const terrainQuaternion = new THREE.Quaternion();
+    const gunAimOrigin = new THREE.Vector3();
+    const gunAimDirection = new THREE.Vector3();
+    const gunAimTarget = new THREE.Vector3();
+    const gunAimOffset = new THREE.Vector3();
     let particleRenderer;
     let bulletRenderer;
     let flashLightCursor = 0;
@@ -791,6 +795,7 @@
       muzzleL: null,
       muzzleR: null,
       rocketMount: null,
+      gunSight: null,
       cockpit: null,
       steeringWheel: null,
       speedNeedle: null,
@@ -1299,6 +1304,7 @@
       window.__desertPerf = {
         renderer,
         scene,
+        camera,
         world,
         player,
         staticBatchStats,
@@ -2824,7 +2830,7 @@
         mirrorSurface,
       ]);
       camera.add(cockpit);
-      return { cockpit, wheelTurn, speedNeedle, rpmNeedle };
+      return { cockpit, wheelTurn, speedNeedle, rpmNeedle, sight };
     }
 
     function createPlayer() {
@@ -2841,6 +2847,7 @@
       scene.add(player.group);
       const cockpit = createCockpit();
       player.cockpit = cockpit.cockpit;
+      player.gunSight = cockpit.sight;
       player.steeringWheel = cockpit.wheelTurn;
       player.speedNeedle = cockpit.speedNeedle;
       player.rpmNeedle = cockpit.rpmNeedle;
@@ -3407,6 +3414,44 @@
       obj.pos.y = terrainHeight(obj.pos.x, obj.pos.z);
     }
 
+    function getPlayerSightAimPoint(out) {
+      camera.getWorldPosition(gunAimOrigin);
+      if (cameraMode === "cockpit" && player.gunSight) {
+        player.gunSight.getWorldPosition(gunAimDirection);
+        gunAimDirection.sub(gunAimOrigin).normalize();
+      } else {
+        gunAimDirection.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+      }
+
+      let aimDistance = 180;
+
+      // Snap convergence to an enemy center only when it is already inside
+      // the sight line; this preserves manual aiming without auto-aiming.
+      for (const enemy of world.enemies) {
+        if (enemy.dead) continue;
+        gunAimOffset.copy(enemy.pos).setY(enemy.pos.y + 1.45).sub(gunAimOrigin);
+        const alongRay = gunAimOffset.dot(gunAimDirection);
+        if (alongRay < 5 || alongRay >= aimDistance) continue;
+        const perpendicularSq = Math.max(
+          0,
+          gunAimOffset.lengthSq() - alongRay * alongRay
+        );
+        const aimRadius = enemy.collisionRadius + 1.15;
+        if (perpendicularSq <= aimRadius * aimRadius) aimDistance = alongRay;
+      }
+
+      // Converge on visible terrain when the reticle points into a hill.
+      for (let distance = 8; distance < aimDistance; distance += 4) {
+        out.copy(gunAimOrigin).addScaledVector(gunAimDirection, distance);
+        if (out.y <= terrainHeight(out.x, out.z) + .22) {
+          aimDistance = distance;
+          break;
+        }
+      }
+
+      return out.copy(gunAimOrigin).addScaledVector(gunAimDirection, aimDistance);
+    }
+
     function firePlayerGun() {
       if (player.fireCooldown > 0 || player.heat > 96) return;
       player.fireCooldown = .085;
@@ -3414,24 +3459,8 @@
       const muzzle = Math.random() < .5 ? player.muzzleL : player.muzzleR;
       const pos = new THREE.Vector3();
       muzzle.getWorldPosition(pos);
-      const forward = forwardFromYaw(player.yaw);
-      let dir;
-      if (cameraMode === "cockpit") {
-        // The roof-mounted guns sit above and to the right of the driver's
-        // sight line. Converge both barrels through the ring sight instead of
-        // letting their parallel fire pass over its upper edge.
-        const aimTarget = player.pos.clone()
-          .addScaledVector(rightFromYaw(player.yaw), -.78)
-          .addScaledVector(forward, 24)
-          .setY(2.70);
-        dir = aimTarget.sub(pos).normalize();
-        dir.y += rand(-.004, .004);
-      } else {
-        dir = forward;
-        dir.y = rand(-.006,.012);
-      }
-      dir.applyAxisAngle(new THREE.Vector3(0,1,0), rand(-.012,.012));
-      createBullet(pos, dir.multiplyScalar(125).add(player.velocity), "player", 13);
+      const dir = getPlayerSightAimPoint(gunAimTarget).sub(pos).normalize();
+      createBullet(pos, dir.multiplyScalar(125), "player", 13);
       muzzleFlash(pos, 0xffc45c);
       audioShot("gun", pos);
       screenShake = Math.max(screenShake, .07);
