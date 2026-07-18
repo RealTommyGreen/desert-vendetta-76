@@ -1481,6 +1481,8 @@
           topColor: { value: new THREE.Color(0x522e63) },
           midColor: { value: new THREE.Color(0xe46b41) },
           bottomColor: { value: new THREE.Color(0xf0b262) },
+          sunColor: { value: new THREE.Color(0xffcf78) },
+          sunDirection: { value: new THREE.Vector3(-165, 72, -310).normalize() },
         },
         vertexShader: `
           varying vec3 vWorldPosition;
@@ -1494,24 +1496,24 @@
           uniform vec3 topColor;
           uniform vec3 midColor;
           uniform vec3 bottomColor;
+          uniform vec3 sunColor;
+          uniform vec3 sunDirection;
           varying vec3 vWorldPosition;
           void main() {
-            float h = normalize(vWorldPosition).y;
+            vec3 viewDirection = normalize(vWorldPosition - cameraPosition);
+            float h = viewDirection.y;
             vec3 col = mix(bottomColor, midColor, smoothstep(-0.10, 0.20, h));
             col = mix(col, topColor, smoothstep(0.18, 0.78, h));
+            float towardSun = dot(viewDirection, sunDirection);
+            float sunGlow = smoothstep(0.975, 0.999, towardSun);
+            float sunDisc = smoothstep(0.9982, 0.9990, towardSun);
+            col += sunColor * sunGlow * 0.34;
+            col = mix(col, sunColor, sunDisc * 0.96);
             gl_FragColor = vec4(col, 1.0);
           }
         `
       });
       scene.add(new THREE.Mesh(geo, mat));
-
-      const sunDisc = new THREE.Mesh(
-        new THREE.CircleGeometry(18, 48),
-        new THREE.MeshBasicMaterial({ color: 0xffcf78, transparent: true, opacity: .95, depthWrite: false })
-      );
-      sunDisc.position.set(-165, 72, -310);
-      sunDisc.lookAt(camera.position);
-      scene.add(sunDisc);
 
       const mountainMat = new THREE.MeshStandardMaterial({
         color: 0x5d2c32,
@@ -4638,8 +4640,8 @@
           !started || gameEnded || !player.alive) return;
 
       mirrorUpdateAccumulator += dt;
-      if (mirrorUpdateAccumulator < 1/30) return;
-      mirrorUpdateAccumulator %= 1/30;
+      if (mirrorUpdateAccumulator < 1/60) return;
+      mirrorUpdateAccumulator %= 1/60;
 
       const forward = forwardFromYaw(player.yaw, tempVectorA);
       mirrorCamera.position.copy(player.pos)
