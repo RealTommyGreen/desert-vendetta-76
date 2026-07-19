@@ -3459,8 +3459,21 @@
       const muzzle = Math.random() < .5 ? player.muzzleL : player.muzzleR;
       const pos = new THREE.Vector3();
       muzzle.getWorldPosition(pos);
-      const dir = getPlayerSightAimPoint(gunAimTarget).sub(pos).normalize();
-      createBullet(pos, dir.multiplyScalar(125), "player", 13);
+      let dir;
+      if (cameraMode === "cockpit") {
+        dir = getPlayerSightAimPoint(gunAimTarget).sub(pos).normalize();
+      } else {
+        // The chase camera looks down at the road ahead. Using its center ray
+        // makes the rounds dive into the ground and hides the visible MG stream
+        // behind the car. Keep chase-view fire parallel to the roof guns.
+        dir = forwardFromYaw(player.yaw);
+        dir.y = rand(-.006, .012);
+        dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), rand(-.012, .012));
+      }
+      const inheritedVelocity = cameraMode === "cockpit" ? null : player.velocity;
+      const bulletVelocity = dir.multiplyScalar(125);
+      if (inheritedVelocity) bulletVelocity.add(inheritedVelocity);
+      createBullet(pos, bulletVelocity, "player", 13);
       muzzleFlash(pos, 0xffc45c);
       audioShot("gun", pos);
       screenShake = Math.max(screenShake, .07);
